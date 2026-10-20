@@ -6,7 +6,7 @@
     "type": "offline"
   },
   "server": {
-    "ip": "NITIANS.aternos.me:54678",
+    "ip": "NITIANS.aternos.me",
     "port": 54678,
     "version": "1.21.1"
   },

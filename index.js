@@ -2,8 +2,50 @@ const mineflayer = require('mineflayer');
 const { Movements, pathfinder, goals } = require('mineflayer-pathfinder');
 const { GoalBlock } = goals;
 const config = require('./settings.json');
+const setupLeaveRejoin = require('./leaveRejoin');
 const express = require('express');
 const http = require('http');
+const https = require('https');
+
+// ============================================================
+// ENVIRONMENT VARIABLE OVERRIDES (For Railway, Docker, Render, etc.)
+// ============================================================
+if (process.env.SERVER_IP || process.env.MC_HOST) {
+  config.server.ip = process.env.SERVER_IP || process.env.MC_HOST;
+}
+if (process.env.SERVER_PORT || process.env.MC_PORT) {
+  config.server.port = parseInt(process.env.SERVER_PORT || process.env.MC_PORT, 10);
+}
+if (process.env.SERVER_VERSION || process.env.MC_VERSION) {
+  config.server.version = process.env.SERVER_VERSION || process.env.MC_VERSION;
+}
+if (process.env.BOT_USERNAME || process.env.MC_USERNAME) {
+  config['bot-account'].username = process.env.BOT_USERNAME || process.env.MC_USERNAME;
+}
+if (process.env.BOT_PASSWORD || process.env.MC_PASSWORD) {
+  config['bot-account'].password = process.env.BOT_PASSWORD || process.env.MC_PASSWORD;
+}
+if (process.env.BOT_AUTH_TYPE || process.env.MC_AUTH) {
+  config['bot-account'].type = process.env.BOT_AUTH_TYPE || process.env.MC_AUTH;
+}
+if (process.env.AUTH_PASSWORD) {
+  if (!config.utils['auto-auth']) config.utils['auto-auth'] = { enabled: true };
+  config.utils['auto-auth'].password = process.env.AUTH_PASSWORD;
+}
+if (process.env.DISCORD_WEBHOOK_URL) {
+  if (!config.discord) config.discord = { events: { connect: true, disconnect: true, chat: false } };
+  config.discord.webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  config.discord.enabled = true;
+}
+
+// Automatically normalize server IP if user included the port (e.g., "myserver.aternos.me:12345")
+if (typeof config.server.ip === 'string' && config.server.ip.includes(':')) {
+  const parts = config.server.ip.split(':');
+  config.server.ip = parts[0];
+  if (!config.server.port && parts[1]) {
+    config.server.port = parseInt(parts[1], 10);
+  }
+}
 
 // ============================================================
 // EXPRESS SERVER - Keep Render/Aternos alive
@@ -281,19 +323,25 @@ function formatUptime(seconds) {
 }
 
 // ============================================================
-// SELF-PING - Prevent Render from sleeping
+// SELF-PING - Prevent Cloud Free Hosts from Sleeping (Railway / Render)
 // ============================================================
 const SELF_PING_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-const https = require('https');
+function getPublicUrl() {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) return `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  if (process.env.RAILWAY_STATIC_URL) return `https://${process.env.RAILWAY_STATIC_URL}`;
+  if (process.env.RENDER_EXTERNAL_URL) return process.env.RENDER_EXTERNAL_URL;
+  return `http://localhost:${PORT}`;
+}
 
 function startSelfPing() {
   setInterval(() => {
-    const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+    const url = getPublicUrl();
     const protocol = url.startsWith('https') ? https : http;
 
     protocol.get(`${url}/ping`, (res) => {
-      // console.log(`[KeepAlive] Self-ping: ${res.statusCode}`); // Optional: reduce spam
+      // Keep alive heartbeat ok
     }).on('error', (err) => {
       console.log(`[KeepAlive] Self-ping failed: ${err.message}`);
     });
@@ -396,33 +444,17 @@ function createBot() {
 
   console.log(`[Bot] [+] Successfully spawned on server!`);
 
-  // 🔐 FORCE LOGIN SYSTEM (Perzaan Edition)
-
-      bot.on('messagestr', (msg) => {
-  const message = msg.toLowerCase();
-
-  // Login
-  if (message.includes('login')) {
-    bot.chat('/login Perzuu');
-    console.log('[Auth] Login detected');
-  }
-
-  // Register
-  if (message.includes('register')) {
-    bot.chat('/register Perzuu Perzuu');
-    console.log('[Auth] Register detected');
-  }
-
-  // Creative mode success
-  if (
-    message.includes('commands.gamemode.success.self') ||
-    message.includes('set own game mode to creative mode')
-  ) {
-    console.log('[INFO] Bot is now in Creative Mode.');
-
-    bot.chat('/gamerule sendCommandFeedback false');
-  }
-});
+  // Mode detection
+  bot.on('messagestr', (msg) => {
+    const message = msg.toLowerCase();
+    if (
+      message.includes('commands.gamemode.success.self') ||
+      message.includes('set own game mode to creative mode')
+    ) {
+      console.log('[INFO] Bot is now in Creative Mode.');
+      bot.chat('/gamerule sendCommandFeedback false');
+    }
+  });
 
       if (config.discord && config.discord.events.connect) {
   sendDiscordWebhook(`[+] **Connected** to \`${config.server.ip}\``, 0x4ade80);
@@ -514,27 +546,29 @@ function initializeModules(bot, mcData, defaultMove) {
   console.log('[Modules] Initializing all modules...');
 
   // ---------- AUTO AUTH ----------
-  let authDone = false;
+  if (config.utils && config.utils['auto-auth'] && config.utils['auto-auth'].enabled) {
+    let authDone = false;
+    const authPassword = config.utils['auto-auth'].password || 'Perzuu';
 
-bot.on('messagestr', (msg) => {
-  const message = msg.toLowerCase();
+    bot.on('messagestr', (msg) => {
+      const message = msg.toLowerCase();
+      if (authDone) return;
 
-  if (authDone) return;
+      if (message.includes('/register') || message.includes('register')) {
+        authDone = true;
+        bot.chat(`/register ${authPassword} ${authPassword}`);
+        console.log('[Auth] Register sent');
+        return;
+      }
 
-  if (message.includes('/register') || message.includes('register')) {
-    authDone = true;
-    bot.chat('/register Perzuu Perzuu');
-    console.log('[Auth] Register sent');
-    return;
+      if (message.includes('/login') || message.includes('login')) {
+        authDone = true;
+        bot.chat(`/login ${authPassword}`);
+        console.log('[Auth] Login sent');
+        return;
+      }
+    });
   }
-
-  if (message.includes('/login') || message.includes('login')) {
-    authDone = true;
-    bot.chat('/login Perzuu');
-    console.log('[Auth] Login sent');
-    return;
-  }
-});
 
   // ---------- MOVE TO POSITION ----------
   if (config.position.enabled) {
@@ -583,9 +617,6 @@ bot.on('messagestr', (msg) => {
 
   console.log('[Modules] All modules initialized!');
 }
-
-// Periodic Rejoin Module
-const setupLeaveRejoin = require('./leaveRejoin');
 
 // Periodic Rejoin Module - Handled by leaveRejoin.js now
 function periodicRejoin(bot) {
